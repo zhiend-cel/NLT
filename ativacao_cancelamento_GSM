@@ -1,0 +1,157 @@
+import pandas as pd
+from tqdm import tqdm
+import glob
+import os
+import time
+import re
+import tkinter as tk
+from tkinter import filedialog
+
+colunas_usadas = ['msisdn', 'data_ativacao', 'fase', 'cliente']
+
+os.system('cls')
+
+def extrair_datanome(nome_arquivo):
+
+	nome = str(nome_arquivo)
+	
+	match_completo = re.search(r"(\d{1,2})-(\d{1,2})-(\d{4})", nome)
+	if match_completo:
+		dia, mes, ano = match_completo.groups()
+		return f"{ano}-{mes.zfill(2)}-{dia.zfill(2)}"
+	
+	match_mensal = re.search(r"(\d{2})_(\d{4})", str(nome_arquivo))
+	if match_mensal:
+		mes, ano = match_mensal.groups()
+		return f"{ano}-{mes.zfill(2)}-01"
+	
+	return nome
+
+def main():
+	print("="*209)
+	print("									Gerador dos Relatórios de Ativações e Cancelamentos - GSM")
+	print("="*209)
+	
+	root = tk.Tk()
+	root.withdraw()
+	root.attributes('-topmost', True)
+
+	print("\n Aguardando seleção da pasta...")
+	caminho_fechamentos = filedialog.askdirectory(title="Selecione a pasta Fechamentos")
+
+	if not caminho_fechamentos:
+		print("Operação cancelada.")
+		return
+
+	print(f"\n Pasta selecionada: {caminho_fechamentos}")
+
+	try:
+		os.chdir(caminho_fechamentos)
+	except FileNotFoundError:
+		print("\n Erro: Pasta não encontrada. Verifique o caminho.")
+		input("Pressione ENTER para sair.")
+		return
+	
+	# Listar os arquivos
+
+	arquivos = glob.glob("*.csv")
+	if not arquivos:
+		print("\n Nenhum arquivo .csv na pasta. Verifique o caminho.")
+		input("Pressione ENTER para sair.")
+		return
+		
+	print(f"\n Encontrados {len(arquivos)} arquivos. Iniciando processamento...")
+
+	lista_dfs = []
+	
+	# Loop de leitura
+	
+	for arquivo in tqdm(arquivos, desc="Lendo arquivos.", unit="arq"):
+		
+		try:			
+			df_temp = pd.read_csv(arquivo, sep=None, engine='python', on_bad_lines='skip')
+			
+			df_temp.columns = df_temp.columns.str.lower().str.strip()
+			df_temp.rename(columns={'data_de_ativacao': 'data_ativacao'}, inplace=True)
+			
+			df_temp['arquivo_origem'] = arquivo
+			
+			try:
+				df_temp = df_temp[colunas_usadas + ['arquivo_origem']]
+				lista_dfs.append(df_temp)
+			except KeyError as e:
+				tqdm.write(f"Arquivo ignorado, falta colunas. Erro: {e}.")
+		
+		except Exception as e:
+			tqdm.write(f"	Erro no arquivo {arquivo}: {e}")
+		
+	if not lista_dfs:
+		print("Nenhum dado válido carregado.")
+		return
+	
+	print("\n	Consolidando histórico completo...")
+	
+	with tqdm(total=5, desc="	Etapas", unit="passo") as pbar:
+	
+		pbar.set_description("\nConsolidando Tabelas...")
+		df = pd.concat(lista_dfs)
+		pbar.update(1)
+		# Lógica de comparação Cancelamentos
+		
+		pbar.set_description("\nCalculando Cancelamentos...")
+		
+		df.sort_values(by=['msisdn', 'arquivo_origem'], inplace=True)
+		
+		df['fase_anterior'] = df.groupby('msisdn')['fase'].shift(1)
+		
+		df_cancelados = df[
+			(df['fase_anterior'] == 'Vinculado') &
+			(df['fase'] == 'Quarentena')
+		].copy()
+		
+		pbar.update(1)
+		
+		pbar.set_description("\nSalvando Relatório de Cancelamentos...")
+		
+		if not df_cancelados.empty:
+			relatorio_cancelamentos = df_cancelados.groupby(['cliente', 'arquivo_origem'])['msisdn'].count().reset_index()
+			relatorio_cancelamentos.rename(columns={'arquivo_origem': 'mês_ref', 'msisdn': 'Cancelamentos'
+			}, inplace=True)
+			
+
+			relatorio_cancelamentos['mês_ref'] = relatorio_cancelamentos['mês_ref'].apply(extrair_datanome)
+			relatorio_cancelamentos['mês_ref'] = pd.to_datetime(relatorio_cancelamentos['mês_ref'])
+			relatorio_cancelamentos['mês_ref'] = relatorio_cancelamentos['mês_ref'].dt.to_period('M').dt.to_timestamp() - pd.Timedelta(days=1)
+			relatorio_cancelamentos.to_csv("Relatório_Cancelamentos - GSM.csv", sep=';', index=False, encoding='utf-8-sig')
+		
+		pbar.update(1)
+
+			
+		pbar.set_description("\nCalculando Ativações...")
+		
+		df_ativacoes = df.drop_duplicates(subset=['msisdn', 'data_ativacao'], keep='last').copy()
+		
+		df_ativacoes['data_ativacao'] = pd.to_datetime(df_ativacoes['data_ativacao'], errors='coerce').dt.date
+		
+		relatorio_ativacoes = df_ativacoes.groupby(['cliente', 'data_ativacao'])['msisdn'].count().reset_index()
+		relatorio_ativacoes.rename(columns={'msisdn': 'Ativações'}, inplace=True)
+		
+		pbar.update(1)
+		
+		pbar.set_description("\n Salvando Relatório de Ativações...")	
+		
+		relatorio_ativacoes.to_csv("Relatório_Ativações - GSM.csv", sep=';', index=False, encoding='utf-8-sig')
+		print("\n	Arquivo 'Relatório_Ativações - GSM.csv' salvo.")
+		
+		pbar.update(1)
+	
+	print("\n" + "="*209)
+	print("												Processo finalizado.")
+	print("="*209)
+
+
+
+	input("\nPressione ENTER para fechar...")
+
+if __name__ == "__main__":
+	main()
