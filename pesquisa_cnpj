@@ -1,0 +1,89 @@
+import pandas as pd
+from duckduckgo_search import DDGS
+import re
+import time
+import requests
+
+# Lista de empresas
+empresas = [
+    
+]
+
+resultados = []
+ddgs = DDGS()
+
+print(f"Iniciando pesquisa de dados para {len(empresas)} empresas...\n")
+
+padrao_cnpj = r'\d{2}[\.]?\d{3}[\.]?\d{3}[\/]?\d{4}[-]?:?\d{2}'
+
+def consultar_detalhes_brasilapi(cnpj_raw):
+
+    # Remove tudo que não é número
+    cnpj_limpo = re.sub(r'[^0-9]', '', cnpj_raw)
+    
+    # Validação básica de tamanho
+    if len(cnpj_limpo) != 14:
+        return "CNPJ Inválido/Incompleto", "-", "-"
+
+    try:
+        url = f"https://brasilapi.com.br/api/cnpj/v1/{cnpj_limpo}"
+        resp = requests.get(url, timeout=5)
+        
+        if resp.status_code == 200:
+            dados = resp.json()
+            return dados.get('municipio', 'N/A'), dados.get('uf', 'N/A'), dados.get('descricao_situacao_cadastral', 'N/A')
+        elif resp.status_code == 404:
+            return "Não encontrado na Receita", "-", "-"
+        else:
+            return f"Erro API: {resp.status_code}", "-", "-"
+            
+    except Exception as e:
+        return f"Erro Conexão: {str(e)}", "-", "-"
+
+#LOOP PRINCIPAL
+for empresa in empresas:
+    cnpj_encontrado = "Não encontrado"
+    cidade = "-"
+    uf = "-"
+    situacao = "-"
+    fonte = "-"
+    
+    try:
+        query = f"CNPJ {empresa}"
+        results = list(ddgs.text(query, region='br-pt', max_results=2))
+        
+        if results:
+            texto_completo = (results[0]['title'] + " " + results[0]['body'])
+            match = re.search(padrao_cnpj, texto_completo)
+            
+            if match:
+                cnpj_encontrado = match.group(0)
+                fonte = results[0]['title']
+            
+                print(f"   > CNPJ achado ({cnpj_encontrado}). Consultando detalhes...")
+                cidade, uf, situacao = consultar_detalhes_brasilapi(cnpj_encontrado)
+            
+            else:
+                match_cpf = re.search(r'\d{3}\.?\d{3}\.?\d{3}-?\d{2}', texto_completo)
+                if match_cpf:
+                    cnpj_encontrado = f"Provável CPF: {match_cpf.group(0)}"
+
+    except Exception as e:
+        cnpj_encontrado = f"Erro Script: {e}"
+
+    print(f"Empresa: {empresa[:20]:<20} | CNPJ: {cnpj_encontrado:<18} | Local: {cidade}-{uf}")
+    
+    resultados.append({
+        "Razão Social Input": empresa,
+        "CNPJ Encontrado": cnpj_encontrado,
+        "Cidade": cidade,
+        "UF": uf,
+        "Situação Cadastral": situacao,
+        "Fonte da Busca": fonte
+    })
+    
+    time.sleep(1.5)
+
+df = pd.DataFrame(resultados)
+df.to_excel("Relatorio_Completo_CNPJs.xlsx", index=False)
+print("\nProcesso finalizado com sucesso.")
