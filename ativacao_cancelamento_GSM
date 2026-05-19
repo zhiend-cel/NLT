@@ -168,15 +168,91 @@ def main():
 		
 		pbar.set_description("\nSalvando Relatório de Cancelamentos...")
 		
-		if not df_cancelados.empty:
-			relatorio_cancelamentos = df_cancelados.groupby(['cliente', 'arquivo_origem'])['msisdn'].count().reset_index()
-			relatorio_cancelamentos.rename(columns={'arquivo_origem': 'mês_ref', 'msisdn': 'Cancelamentos'
-			}, inplace=True)
-			
+		df_calc_final = pd.DataFrame()	
 
-			relatorio_cancelamentos['mês_ref'] = relatorio_cancelamentos['mês_ref'].apply(extrair_datanome)
-			relatorio_cancelamentos['mês_ref'] = pd.to_datetime(relatorio_cancelamentos['mês_ref'], errors='coerce')
-			relatorio_cancelamentos['mês_ref'] = relatorio_cancelamentos['mês_ref'].dt.to_period('M').dt.to_timestamp() - pd.Timedelta(days=1)
+		if not df_cancelados.empty:
+
+			df_calc_final = df_cancelados.groupby(['cliente', 'arquivo_origem'])['msisdn'].count().reset_index()
+			df_calc_final.rename(columns={'arquivo_origem':'Data', 'msisdn': 'Cancelamentos_calc'}, inplace=True)
+
+			df_calc_final['Data']= df_calc_final['Data'].apply(extrair_datanome)
+			df_calc_final['Data']= pd.to_datetime(df_calc_final['Data'], errors='coerce')
+
+
+			df_calc_final['Data'] = df_calc_final['Data'].dt.to_period('M').dt.to_timestamp() - pd.Timedelta(days=1)
+			df_calc_final['Data'] = df_calc_final['Data'].dt.date
+
+		print("\n" + "-"*90)
+		tqdm.write("Selecione a tabela de Churn.")
+		arq_quarentena = filedialog.askopenfilename(title="Selelecione a planilha Churn.")
+
+		df_quar_final = pd.DataFrame()
+
+		if arq_quarentena:
+			try:
+				df_quar = ler_csv_int(arq_quarentena)
+				if df_quar is not None:
+					df_quar.columns = df_quar.columns.str.lower().str.strip()
+
+					col_remap = {
+						'nome': 'fase',
+						'name': 'cliente'
+					}
+					df_quar.rename(columns=col_remap, inplace=True)
+					
+					col_data = 'data_fase'
+					cols_quar = df_quar.columns
+
+					if col_data not in cols_quar:
+						potenciais = [c for c in cols_quar if 'data' in c or 'dt' in c]
+						if potenciais:
+							col_data = potenciais[0]
+
+					if 'fase' in cols_quar and col_data in cols_quar:
+						df_quar = df_quar[df_quar['fase'].astype(str).str.contains("Quarentena", case=False, na=False)]
+						df_quar[col_data] = pd.to_datetime(df_quar[col_data], yearfirst=True, errors='coerce').dt.date
+						df_quar_final = df_quar.groupby(['cliente', col_data])['msisdn'].count().reset_index() 	
+						df_quar_final.rename(columns={col_data: 'Data', 'msisdn': 'Cancelamentos_planilha'}, inplace=True)
+					else: 	
+						tqdm.write(f"Aviso: colunas necessárias não encontradas em {os.path.basename(arq_quarentena)}")
+			except Exception as e:
+				tqdm.write(f"Erro ao ler arquivo: {e}")
+
+		if not df_calc_final.empty and 'Data' in df_calc_final.columns:
+			df_calc_final['Data'] = pd.to_datetime(df_calc_final['Data'], errors='coerce')
+		if not df_quar_final.empty and 'Data' in df_quar_final.columns:
+			df_quar_final['Data'] = pd.to_datetime(df_quar_final['Data'], errors='coerce')
+
+
+		if not 	df_calc_final.empty and not df_quar_final.empty:
+			relatorio_cancelamentos = pd.merge(df_calc_final, df_quar_final, on=['cliente', 'Data'], how='outer')
+		elif not df_calc_final.empty:
+			relatorio_cancelamentos = df_calc_final
+		elif not df_quar_final.empty:
+			relatorio_cancelamentos = df_quar_final
+		else:
+			relatorio_cancelamentos = pd.DataFrame()
+
+		if not relatorio_cancelamentos.empty:
+			relatorio_cancelamentos.fillna(0, inplace=True)
+			if 'Cancelamentos_calc' not in relatorio_cancelamentos.columns:
+				relatorio_cancelamentos['Cancelamentos_calc'] = 0
+			if 'Cancelamentos_planilha' not in relatorio_cancelamentos.columns:
+				relatorio_cancelamentos['Cancelamentos_planilha'] = 0
+
+			relatorio_cancelamentos['Total_canc'] = (
+				relatorio_cancelamentos['Cancelamentos_calc'] +
+				relatorio_cancelamentos['Cancelamentos_planilha']
+			)
+
+			cols_num = ['Cancelamentos_calc', 'Cancelamentos_planilha', 'Total_canc']
+			for c in cols_num:
+				if c in relatorio_cancelamentos.columns:
+					relatorio_cancelamentos[c] = relatorio_cancelamentos[c].astype(int)
+
+			relatorio_cancelamentos.sort_values(by=['cliente', 'Data'], inplace=True)
+			relatorio_cancelamentos['Data'] = pd.to_datetime(relatorio_cancelamentos['Data']).dt.date
+			relatorio_cancelamentos = relatorio_cancelamentos[['cliente', 'Data', 'Total_canc']]
 			relatorio_cancelamentos.to_csv("Relatório_Cancelamentos - GSM.csv", sep=';', index=False, encoding='utf-8-sig')
 		
 		pbar.update(1)
