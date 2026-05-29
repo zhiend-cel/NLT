@@ -5,7 +5,7 @@ import os
 import time
 import re
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, simpledialog
 import warnings
 import gc
 
@@ -13,211 +13,618 @@ warnings.simplefilter(action='ignore', category=UserWarning)
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter('ignore', category=pd.errors.DtypeWarning)
 
-colunas_usadas = ['msisdn', 'data_ativacao', 'fase', 'cliente', 'cnpj']
-
-os.system('cls' if os.name =='nt' else 'clear')
+# Tracking MSISDN and ICCID (CNPJ removed)
+COLUNAS_USADAS = ['msisdn', 'data_ativacao', 'fase', 'cliente', 'iccid', 'consumo', 'plano']
 
 def extrair_datanome(nome_arquivo):
-
-	nome = str(nome_arquivo)
-	
-	match_completo = re.search(r"(\d{1,2})[-._](\d{1,2})[-._](\d{4})", nome)
-	if match_completo:
-		dia, mes, ano = match_completo.groups()
-		return f"{ano}-{mes.zfill(2)}-{dia.zfill(2)}"
-	
-	match_mensal = re.search(r"(\d{2})_(\d{4})", str(nome_arquivo))
-	if match_mensal:
-		mes, ano = match_mensal.groups()
-		return f"{ano}-{mes.zfill(2)}-01"
-	
-	return nome
+    nome = str(nome_arquivo)
+    match = re.search(r'_(\d{2})_(\d{4})', nome)
+    if match:
+        mes, ano = match.groups()
+        return f"{ano}-{mes}-01"
+    
+    match2 = re.search(r'(\d{4})-(\d{2})-(\d{2})', nome)
+    if match2:
+        return match2.group(0)
+        
+    return '1900-01-01'
 
 def ler_csv_int(caminho_arquivo):
-	encodings = ['utf-8-sig', 'latin1', 'cp1252', 'iso-8859-1']
-	separadores = [';', ',']
-	
-	for enc in encodings:
-		for sep in separadores:
-			try:
-				df_teste = pd.read_csv(caminho_arquivo, sep=sep, encoding=enc, nrows=5)
-				if len(df_teste.columns) > 1:
-					return pd.read_csv(caminho_arquivo, sep=sep, encoding=enc, on_bad_lines='skip', dtype=str)
-			except:
-				continue
-	return None
+    encodings = ['utf-8-sig', 'latin1', 'cp1252', 'iso-8859-1']
+    separadores = [';', ',']
+    for enc in encodings:
+        for sep in separadores:
+            try:
+                df_teste = pd.read_csv(caminho_arquivo, sep=sep, encoding=enc, nrows=5)
+                if len(df_teste.columns) > 1:
+                    return pd.read_csv(caminho_arquivo, sep=sep, encoding=enc, on_bad_lines='skip', dtype=str)
+            except:
+                continue
+    return None
+
+def solicitar_arquivos():
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+
+    print("\n Aguardando seleção da pasta...")
+    pasta = filedialog.askdirectory(title="Selecione a pasta com os CSVs")
+    if not pasta:
+        print("Nenhuma pasta selecionada.")
+        return None
+    return pasta
+
+def carregar_arquivos(caminho_fechamentos):
+    try:
+        os.chdir(caminho_fechamentos)
+    except FileNotFoundError:
+        print("\n Erro: Pasta não encontrada. Verifique o caminho.")
+        return None
+    
+    arquivos = sorted(glob.glob("*.csv"))
+    if not arquivos:
+        print("\n Nenhum arquivo .csv na pasta. Verifique o caminho.")
+        return None
+        
+    print("\nOpções de Filtro de Histórico:")
+    print(" - Digite 'Todos' para processar todo o histórico disponível.")
+    print(" - Digite o número de meses para trás (ex: 3 para processar o mês atual + os últimos 3 meses).")
+    print(" - Digite 0 para processar APENAS o mês atual (arquivos 'report_simcards').")
+    
+    meses_str = input("\nSua escolha: ").strip().lower()
+    
+    if meses_str == 'todos':
+        meses_retroativos = 9999
+    else:
+        try:
+            meses_retroativos = int(meses_str)
+        except ValueError:
+            print("Valor inválido. Considerando 'Todos' os meses por padrão.")
+            meses_retroativos = 9999
+        
+    max_prefix = -1
+    for arq in arquivos:
+        nome_arquivo = os.path.basename(arq).lower()
+        if 'report_simcards' in nome_arquivo:
+            continue
+        
+        match = re.match(r'^(\d+)_', nome_arquivo)
+        if match:
+            prefix = int(match.group(1))
+            if prefix > max_prefix:
+                max_prefix = prefix
+                
+    arquivos_filtrados = []
+    for arq in arquivos:
+        nome_arquivo = os.path.basename(arq).lower()
+        
+        if 'report_simcards' in nome_arquivo:
+            arquivos_filtrados.append(arq)
+            continue
+            
+        match = re.match(r'^(\d+)_', nome_arquivo)
+        if match:
+            prefix = int(match.group(1))
+            if prefix >= max_prefix - meses_retroativos + 1:
+                arquivos_filtrados.append(arq)
+        else:
+            arquivos_filtrados.append(arq)
+            
+    arquivos = arquivos_filtrados
+    print(f"\n Filtrado para os últimos {meses_retroativos} meses. Processando {len(arquivos)} arquivos...")
+        
+    lista_dfs = []
+    
+    for arquivo in tqdm(arquivos, desc="Lendo arquivos.", unit="arq"):
+        try:            
+            df_temp = ler_csv_int(arquivo)
+            if df_temp is None:
+                tqdm.write(f"    Erro, não consegui ler {arquivo} (formato desconhecido).")
+                continue
+            
+            df_temp.columns = df_temp.columns.str.strip().str.lower()
+            df_temp.rename(columns={
+                'data_de_ativacao': 'data_ativacao',
+                'data_ativacao (data e hora)': 'data_ativacao',
+                'dt_ativacao': 'data_ativacao',
+                'plano tarifário': 'plano',
+                'plano_tarifario': 'plano',
+                'plan': 'plano',
+                'consumo de dados': 'consumo',
+                'consumo_kb': 'consumo',
+                'data usage': 'consumo',
+                'volume de dados': 'consumo'
+            }, inplace=True)
+            
+            # FALLBACK: If older files don't have ICCID, use MSISDN to ensure they are still processed
+            if 'iccid' not in df_temp.columns and 'msisdn' in df_temp.columns:
+                df_temp['iccid'] = df_temp['msisdn']
+
+            cols_existentes = [c for c in COLUNAS_USADAS if c in df_temp.columns]
+            if 'iccid' not in cols_existentes or 'msisdn' not in cols_existentes:
+                del df_temp
+                gc.collect()
+                continue
+            
+            df_temp = df_temp[cols_existentes].copy()
+            
+            # PARSING CONSUMO & PLANO
+            if 'consumo' not in df_temp.columns:
+                df_temp['consumo'] = 0.0
+            else:
+                if df_temp['consumo'].astype(str).str.contains(',').any():
+                    c_str = df_temp['consumo'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+                else:
+                    c_str = df_temp['consumo'].astype(str)
+                df_temp['consumo'] = pd.to_numeric(c_str, errors='coerce').fillna(0.0)
+                
+            if 'plano' not in df_temp.columns:
+                df_temp['plano'] = 'Desconhecido'
+            else:
+                df_temp['plano'] = df_temp['plano'].astype(str)
+                
+            if 'msisdn' in df_temp.columns:
+                msisdn_num = pd.to_numeric(df_temp['msisdn'], errors='coerce')
+                df_temp['msisdn'] = msisdn_num.apply(lambda x: str(int(x)) if pd.notna(x) else None)
+                df_temp.dropna(subset=['msisdn'], inplace=True)
+
+            if 'iccid' in df_temp.columns:
+                df_temp['iccid'] = df_temp['iccid'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+                df_temp.dropna(subset=['iccid'], inplace=True)
+
+            if 'data_ativacao' in df_temp.columns:
+                series_data = df_temp['data_ativacao'].astype(str)
+                tem_barra = series_data.str.contains('/', regex=False).any()
+                df_temp['data_ativacao'] = pd.to_datetime(series_data, dayfirst=tem_barra, errors='coerce').dt.date
+
+            df_temp['arquivo_origem'] = arquivo
+            df_temp['indice_leitura'] = pd.to_datetime(extrair_datanome(arquivo), errors='coerce')
+
+            # DEDUPLICATION LOGIC: Anchor on ICCID, prioritizing 'Vinculado' status
+            if 'fase' in df_temp.columns and 'iccid' in df_temp.columns:
+                df_temp['fase_sort_key'] = df_temp['fase'].astype(str).str.strip().str.lower() == 'vinculado'
+                df_temp.sort_values(by=['iccid', 'fase_sort_key'], ascending=[True, False], inplace=True)
+                df_temp.drop_duplicates(subset=['iccid'], keep='first', inplace=True)
+                df_temp.drop(columns=['fase_sort_key'], inplace=True)
+
+            for col in ['fase', 'cliente', 'arquivo_origem']:
+                if col in df_temp.columns:
+                    df_temp[col] = df_temp[col].astype('category')
+
+            lista_dfs.append(df_temp)
+            
+            del df_temp
+            gc.collect()
+        
+        except Exception as e:
+            tqdm.write(f"    Erro inesperado ao processar {arquivo}: {e}")
+            
+    if not lista_dfs:
+        print("Nenhum dado válido carregado.")
+        return None
+        
+    df = pd.concat(lista_dfs, ignore_index=True)
+    df['msisdn'] = df['msisdn'].astype(str).str.replace(',', '.')
+    del lista_dfs
+    gc.collect()
+    
+    return df
+
+def calcular_transicoes(df, pbar):
+    pbar.set_description("Calculando Transições e Relatório Matemático...")
+    
+    datas_leitura = sorted(df['indice_leitura'].dropna().unique())
+    cancelados_dfs = []
+    ativacoes_brutas_dfs = []
+    suspenso_dfs = []
+    reativacoes_dfs = []
+    math_summary_dfs = []
+
+    if not datas_leitura:
+        return None, None, None, None, None
+
+    df_primeiro_mes = df[df['indice_leitura'] == datas_leitura[0]]
+    df_vinc_primeiro = df_primeiro_mes[df_primeiro_mes['fase'].astype(str).str.strip().str.lower() == 'vinculado'].copy()
+    if not df_vinc_primeiro.empty:
+        df_vinc_primeiro['data_ativacao_date'] = pd.to_datetime(df_vinc_primeiro['data_ativacao'], errors='coerce').dt.date
+        ativacoes_brutas_dfs.append(df_vinc_primeiro[['iccid', 'msisdn', 'cliente', 'data_ativacao_date']])
+
+    for i in range(1, len(datas_leitura)):
+        data_ant = datas_leitura[i-1]
+        data_atu = datas_leitura[i]
+        
+        df_ant = df[df['indice_leitura'] == data_ant]
+        df_atu = df[df['indice_leitura'] == data_atu]
+        
+        df_ant_vinc = df_ant[df_ant['fase'].astype(str).str.strip().str.lower() == 'vinculado']
+        df_atu_vinc = df_atu[df_atu['fase'].astype(str).str.strip().str.lower() == 'vinculado']
+        
+        base_ant_counts = df_ant_vinc.groupby('cliente', observed=True)['iccid'].nunique().rename('base m-1')
+        base_atu_counts = df_atu_vinc.groupby('cliente', observed=True)['iccid'].nunique().rename('base m')
+
+        merged_canc = pd.merge(df_ant_vinc, df_atu, on='iccid', how='left', suffixes=('_ant', '_atu'))
+        
+        cond_desapareceu = merged_canc['fase_atu'].isna()
+        cond_nao_vinc = merged_canc['fase_atu'].astype(str).str.strip().str.lower() != 'vinculado'
+        cond_cliente_canc = (merged_canc['cliente_ant'] != merged_canc['cliente_atu']) & ~cond_desapareceu
+        
+        cond_suspenso = merged_canc['fase_atu'].astype(str).str.lower().str.contains('suspens', na=False)
+        
+        mask_suspenso = cond_suspenso & ~cond_cliente_canc
+        mask_cancel = cond_desapareceu | cond_cliente_canc | (cond_nao_vinc & ~mask_suspenso)
+        
+        df_canc_mes = merged_canc[mask_cancel].copy()
+        
+        if not df_canc_mes.empty:
+            df_canc_mes['indice_leitura'] = data_atu
+            df_canc_mes['cliente'] = df_canc_mes['cliente_ant']
+            df_canc_mes['msisdn'] = df_canc_mes['msisdn_atu'].combine_first(df_canc_mes['msisdn_ant'])
+            cancelados_dfs.append(df_canc_mes[['iccid', 'msisdn', 'cliente', 'indice_leitura']])
+
+        mask_suspenso = cond_suspenso & ~cond_cliente_canc
+        df_susp_mes = merged_canc[mask_suspenso].copy()
+        
+        if not df_susp_mes.empty:
+            df_susp_mes['indice_leitura'] = data_atu
+            df_susp_mes['cliente'] = df_susp_mes['cliente_ant']
+            df_susp_mes['msisdn'] = df_susp_mes['msisdn_atu'].combine_first(df_susp_mes['msisdn_ant'])
+            suspenso_dfs.append(df_susp_mes[['iccid', 'msisdn', 'cliente', 'indice_leitura']])
+            
+        canc_counts = df_canc_mes.groupby('cliente_ant', observed=True)['iccid'].nunique().rename('cancelations')
+        susp_counts = df_susp_mes.groupby('cliente_ant', observed=True)['iccid'].nunique().rename('suspensions')
+
+        del merged_canc
+        
+        merged_ativ = pd.merge(df_atu_vinc, df_ant, on='iccid', how='left', suffixes=('_atu', '_ant'))
+        
+        cond_novo = merged_ativ['fase_ant'].isna()
+        cond_era_nao_vinc = merged_ativ['fase_ant'].astype(str).str.strip().str.lower() != 'vinculado'
+        cond_cliente_ativ = (merged_ativ['cliente_ant'] != merged_ativ['cliente_atu']) & ~cond_novo
+        
+        cond_reativacao = cond_era_nao_vinc & ~cond_novo & ~cond_cliente_ativ
+        
+        mask_ativ = cond_novo | cond_cliente_ativ
+        df_ativ_mes = merged_ativ[mask_ativ].copy()
+        
+        if not df_ativ_mes.empty:
+            df_ativ_mes['data_ativacao_date'] = pd.to_datetime(df_ativ_mes['data_ativacao_atu'], errors='coerce').dt.date
+            df_ativ_mes['cliente'] = df_ativ_mes['cliente_atu']
+            df_ativ_mes['msisdn'] = df_ativ_mes['msisdn_atu']
+            ativacoes_brutas_dfs.append(df_ativ_mes[['iccid', 'msisdn', 'cliente', 'data_ativacao_date']])
+
+        df_reativ_mes = merged_ativ[cond_reativacao].copy()
+        
+        if not df_reativ_mes.empty:
+            df_reativ_mes['data_ativacao_date'] = data_atu.date() if hasattr(data_atu, 'date') else data_atu
+            df_reativ_mes['cliente'] = df_reativ_mes['cliente_atu']
+            df_reativ_mes['msisdn'] = df_reativ_mes['msisdn_atu']
+            reativacoes_dfs.append(df_reativ_mes[['iccid', 'msisdn', 'cliente', 'data_ativacao_date']])
+            
+        ativ_counts = df_ativ_mes.groupby('cliente_atu', observed=True)['iccid'].nunique().rename('activations')
+        reativ_counts = df_reativ_mes.groupby('cliente_atu', observed=True)['iccid'].nunique().rename('reactivations')
+
+        del merged_ativ
+        gc.collect()
+
+        df_math = pd.concat([base_ant_counts, ativ_counts, reativ_counts, canc_counts, susp_counts, base_atu_counts], axis=1).fillna(0).astype(int)
+        df_math = df_math[(df_math.T != 0).any()]
+        df_math.index.name = 'client'
+        df_math.reset_index(inplace=True)
+        df_math['month of competence'] = data_atu.date() if hasattr(data_atu, 'date') else data_atu
+        
+        math_summary_dfs.append(df_math)
+
+    df_cancelados = pd.concat(cancelados_dfs, ignore_index=True) if cancelados_dfs else pd.DataFrame(columns=['iccid', 'msisdn', 'cliente', 'indice_leitura'])
+    df_suspenso = pd.concat(suspenso_dfs, ignore_index=True) if suspenso_dfs else pd.DataFrame(columns=['iccid', 'msisdn', 'cliente', 'indice_leitura'])
+    
+    if ativacoes_brutas_dfs:
+        df_ativacoes_brutas = pd.concat(ativacoes_brutas_dfs, ignore_index=True)
+        df_ativacoes_brutas.rename(columns={'data_ativacao_date': 'data_ativacao'}, inplace=True)
+    else:
+        df_ativacoes_brutas = pd.DataFrame(columns=['iccid', 'msisdn', 'cliente', 'data_ativacao'])
+
+    if reativacoes_dfs:
+        df_reativacoes = pd.concat(reativacoes_dfs, ignore_index=True)
+        df_reativacoes.rename(columns={'data_ativacao_date': 'data_ativacao'}, inplace=True)
+    else:
+        df_reativacoes = pd.DataFrame(columns=['iccid', 'msisdn', 'cliente', 'data_ativacao'])
+        
+    df_math_summary = pd.concat(math_summary_dfs, ignore_index=True) if math_summary_dfs else pd.DataFrame(columns=['client', 'base m-1', 'activations', 'reactivations', 'cancelations', 'suspensions', 'base m', 'month of competence'])
+
+    pbar.update(2) # Account for missing synchronization step
+    return df_cancelados, df_suspenso, df_ativacoes_brutas, df_reativacoes, df_math_summary
+
+def gerar_relatorios(df, df_cancelados, df_suspenso, df_ativacoes_brutas, df_reativacoes, df_math_summary, rel_esc):
+    if 1 in rel_esc and not df_cancelados.empty:
+        df_calc_final = df_cancelados.groupby(['cliente', 'indice_leitura'], observed=True)['iccid'].count().reset_index()
+        df_calc_final = df_calc_final[df_calc_final['iccid'] > 0]
+        df_calc_final.rename(columns={'indice_leitura': 'Data', 'iccid': 'Cancelamentos_calc'}, inplace=True)
+        df_calc_final.sort_values(by=['cliente', 'Data'], inplace=True)
+        df_calc_final['Data'] = pd.to_datetime(df_calc_final['Data']).dt.date
+        df_calc_final = df_calc_final[['cliente', 'Data', 'Cancelamentos_calc']]
+        df_calc_final.to_csv("Relatório_Cancelamentos - GSM.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Cancelamentos - GSM.csv")
+
+    if 2 in rel_esc and not df_suspenso.empty:
+        df_susp_final = df_suspenso.groupby(['cliente', 'indice_leitura'], observed=True)['iccid'].count().reset_index()
+        df_susp_final = df_susp_final[df_susp_final['iccid'] > 0]
+        df_susp_final.rename(columns={'indice_leitura': 'Data', 'iccid': 'Suspensões'}, inplace=True)
+        df_susp_final.sort_values(by=['cliente', 'Data'], inplace=True)
+        df_susp_final['Data'] = pd.to_datetime(df_susp_final['Data']).dt.date
+        df_susp_final = df_susp_final[['cliente', 'Data', 'Suspensões']]
+        df_susp_final.to_csv("Relatório_Suspensões - GSM.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Suspensões - GSM.csv")
+
+    if 3 in rel_esc and not df_reativacoes.empty:
+        df_reat_final = df_reativacoes.groupby(['cliente', 'data_ativacao'], observed=True)['iccid'].count().reset_index()
+        df_reat_final = df_reat_final[df_reat_final['iccid'] > 0]
+        df_reat_final.rename(columns={'iccid': 'Reativações'}, inplace=True)
+        df_reat_final.to_csv("Relatório_Reativações - GSM.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Reativações - GSM.csv")
+
+    if 5 in rel_esc:
+        print("    Processando Ativações Base Atual...")
+        df_apenas_ativos = df[df['fase'].astype(str).str.contains("Vinculad", case=False, na=False)].copy()
+        df_apenas_ativos['data_ativacao_date'] = pd.to_datetime(df_apenas_ativos['data_ativacao'], errors='coerce')
+        df_apenas_ativos['data_ativacao_max'] = df_apenas_ativos.groupby(['cliente', 'iccid'], observed=True)['data_ativacao_date'].transform('max')
+        df_ativacoes_base = df_apenas_ativos.dropna(subset=['data_ativacao_max']).drop_duplicates(subset=['iccid'], keep='last').copy()
+        df_ativacoes_base['data_ativacao'] = df_ativacoes_base['data_ativacao_max'].dt.date
+        
+        relatorio_ativacoes_base = df_ativacoes_base.groupby(['cliente', 'data_ativacao'], observed=True)['iccid'].count().reset_index()
+        relatorio_ativacoes_base = relatorio_ativacoes_base[relatorio_ativacoes_base['iccid'] > 0]
+        relatorio_ativacoes_base.rename(columns={'iccid': 'Ativações'}, inplace=True)
+        relatorio_ativacoes_base.to_csv("Relatório_Ativações_BaseAtual - GSM.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Ativações_BaseAtual - GSM.csv")
+    
+    if 4 in rel_esc and not df_math_summary.empty:
+        df_math_summary = df_math_summary[['client', 'base m-1', 'activations', 'reactivations', 'cancelations', 'suspensions', 'base m', 'month of competence']]
+        df_math_summary.to_csv("Relatório_Validação_Matemática.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Validação_Matemática.csv")
+    
+    if 6 in rel_esc and not df_ativacoes_brutas.empty:
+        relatorio_ativacoes_brutas = df_ativacoes_brutas.groupby(['cliente', 'data_ativacao'], observed=True)['iccid'].count().reset_index()
+        relatorio_ativacoes_brutas = relatorio_ativacoes_brutas[relatorio_ativacoes_brutas['iccid'] > 0]
+        relatorio_ativacoes_brutas.rename(columns={'iccid': 'Ativações'}, inplace=True)
+        relatorio_ativacoes_brutas.to_csv("Relatório_Ativações_Brutas - GSM.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Ativações_Brutas - GSM.csv")
+
+def parse_plano(plano_str):
+    plano = str(plano_str).upper()
+    
+    if 'TST' in plano:
+        return 'TST', 0.0
+    
+    match = re.search(r'(\d+)(MB|GB|KB)', plano)
+    if match:
+        val = float(match.group(1))
+        unit = match.group(2)
+        if unit == 'GB':
+            mb_val = val * 1024.0
+        elif unit == 'KB':
+            mb_val = val / 1024.0
+        else:
+            mb_val = val
+            
+        if 'COMP' in plano:
+            return 'COMP', mb_val
+        else:
+            return 'SINGLE', mb_val
+            
+    return 'MVNO', 0.0
+
+def gerar_relatorio_consumo(df):
+    print("\n[+] Gerando Relatório de Consumo (Billing)...")
+    
+    df_billing = df[df['arquivo_origem'].astype(str).str.lower().str.contains('billing', na=False)].copy()
+    if df_billing.empty:
+        print("    Nenhum arquivo 'billing' encontrado. Pulando este relatório.")
+        return
+        
+    df_billing = df_billing[df_billing['fase'].astype(str).str.strip().str.lower() == 'vinculado'].copy()
+    if df_billing.empty:
+        return
+        
+    parsed = df_billing['plano'].apply(parse_plano)
+    df_billing['plan_type'] = parsed.apply(lambda x: x[0])
+    df_billing['plan_mb'] = parsed.apply(lambda x: x[1])
+    
+    # Consumo is actually in BYTES in the raw CSV, not KB! Convert BYTES to MB.
+    df_billing['consumo_mb'] = df_billing['consumo'] / 1048576.0
+    df_billing = df_billing[df_billing['plan_type'] != 'TST']
+    
+    records = []
+    if 'indice_leitura' not in df_billing.columns:
+        return
+        
+    for (data_leitura, cliente), group in df_billing.groupby(['indice_leitura', 'cliente'], observed=True):
+        total_base = len(group)
+        if total_base == 0:
+            continue
+            
+        total_mb = group['consumo_mb'].sum()
+        
+        qtd_non_used = len(group[group['consumo_mb'] <= 0])
+        oversub = qtd_non_used / total_base
+        
+        comp_group = group[group['plan_type'] == 'COMP']
+        comp_pool = comp_group['plan_mb'].sum()
+        comp_consumo = comp_group['consumo_mb'].sum()
+        
+        if comp_pool > 0:
+            comp_pool_usage = comp_consumo / comp_pool
+        else:
+            comp_pool_usage = 0.0
+            
+        single_group = group[group['plan_type'] == 'SINGLE']
+        single_group = single_group[single_group['plan_mb'] > 0] 
+        if not single_group.empty:
+            single_percentages = single_group['consumo_mb'] / single_group['plan_mb']
+            single_mid_usage = single_percentages.mean()
+        else:
+            single_mid_usage = 0.0
+            
+        records.append({
+            'Client': cliente,
+            'Total Base': total_base,
+            'Comp Pool (MB)': round(comp_pool, 2),
+            'Oversub (%)': round(oversub * 100, 2),
+            'Comp Pool Usage (%)': round(comp_pool_usage * 100, 2),
+            'Single Mid Usage (%)': round(single_mid_usage * 100, 2),
+            'Total Consumed (MB)': round(total_mb, 2),
+            'Month of Competence': pd.to_datetime(data_leitura).date()
+        })
+        
+        if records:
+        df_out = pd.DataFrame(records)
+        df_out.sort_values(by=['Month of Competence', 'Client'], inplace=True)
+        df_out.to_csv("Relatório_Consumo_Billing.csv", sep=';', index=False, encoding='utf-8-sig', decimal=',')
+        print("    Salvo: Relatório_Consumo_Billing.csv")
+
+def formatar_planilha(input_file, output_file):
+    print(f"    Lendo o arquivo Excel: {input_file}...")
+    df = pd.read_excel(input_file, header=None)
+
+    data = []
+
+    current_cliente = None
+    current_loja = None
+    current_nome = None
+    current_dt_emissao = None
+    current_tipo_nota = None
+
+    for index, row in df.iterrows():
+        col0 = str(row[0]).strip() if pd.notna(row[0]) else ''
+        
+        if col0 == 'Cliente':
+            continue
+        elif col0 == 'Produto':
+            continue
+        elif col0.startswith('Total da Nota') or col0.startswith('Total do Dia'):
+            continue
+        elif col0 != '' and col0 != 'nan':
+            prev_col0 = str(df.iloc[index-1, 0]).strip() if index > 0 and pd.notna(df.iloc[index-1, 0]) else ''
+            
+            if prev_col0 == 'Cliente':
+                current_cliente = row[0]
+                current_loja = row[1]
+                current_nome = row[2]
+                current_dt_emissao = row[3]
+                current_tipo_nota = row[4]
+            else:
+                if pd.notna(row[1]) and str(row[1]).strip() != '' and str(row[1]).strip() != 'nan':
+                    item_data = {
+                        'Cliente': current_cliente,
+                        'Loja': current_loja,
+                        'Nome': current_nome,
+                        'DT Emissao': current_dt_emissao,
+                        'Tipo da nota': current_tipo_nota,
+                        'Produto': row[0],
+                        'Descricao': row[1],
+                        'Quantidade': row[2],
+                        'Valor Unitario': row[3],
+                        'Valor Mercadoria': row[4],
+                        'Armaz': row[5],
+                        'Cfo': row[6],
+                        'Tes': row[7],
+                        'Pedido': row[8],
+                        'It': row[9],
+                        'Valor IPI': row[10],
+                        'Valor Icms': row[11],
+                        'Valor Iss': row[12],
+                        'Desp.Acessorias': row[13],
+                        'Total': row[14]
+                    }
+                    data.append(item_data)
+
+    print(f"    Encontrados {len(data)} itens.")
+    clean_df = pd.DataFrame(data)
+    print(f"    Salvando o arquivo formatado em: {output_file}...")
+    clean_df.to_excel(output_file, index=False)
+    print("    Concluído!")
 
 def main():
-	print("="*90)
-	print("		Gerador dos Relatórios de Ativações e Cancelamentos - GSM")
-	print("="*90)
-	
-	root = tk.Tk()
-	root.withdraw()
-	root.attributes('-topmost', True)
+    print("="*90)
+    print("		Gerador dos Relatórios de Ativações e Cancelamentos - GSM")
+    print("="*90)
+    
+    print("\nOpções de Relatórios:")
+    print(" 1 - Cancelamentos")
+    print(" 2 - Suspensões")
+    print(" 3 - Reativações")
+    print(" 4 - Validação Matemática")
+    print(" 5 - Ativações Base Atual")
+    print(" 6 - Ativações Brutas")
+    print(" 7 - Consumo Billing")
+    print(" 8 - Conversor Financeiro (Excel)")
+    print(" Digite os números separados por vírgula (ex: 1, 4, 7) ou 'Todos'")
+    
+    escolha_rel = input("\nQuais relatórios deseja gerar? ").strip().lower()
+    
+    rel_esc = []
+    if escolha_rel == 'todos' or not escolha_rel:
+        rel_esc = [1, 2, 3, 4, 5, 6, 7, 8]
+    else:
+        for num in escolha_rel.replace(' ', '').split(','):
+            try:
+                rel_esc.append(int(num))
+            except ValueError:
+                pass
+                
+    if not rel_esc:
+        print("Valor inválido. Gerando todos por padrão.")
+        rel_esc = [1, 2, 3, 4, 5, 6, 7, 8]
 
-	print("\n Aguardando seleção da pasta...")
-	caminho_fechamentos = filedialog.askdirectory(title="Selecione a pasta Fechamentos")
+    # Handle Converter separately so we don't need to load CSVs if it's the only one
+    if 8 in rel_esc:
+        print("\n[+] Iniciando Conversor Financeiro (Excel)...")
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
 
-	if not caminho_fechamentos:
-		print("Operação cancelada.")
-		return
+        print("    Aguardando seleção do arquivo Excel...")
+        input_file = filedialog.askopenfilename(
+            title="Selecione o relatório financeiro (Excel)",
+            filetypes=[("Arquivos Excel", "*.xlsx *.xls")]
+        )
 
-	print(f"\n Pasta selecionada: {caminho_fechamentos}")
+        if input_file:
+            base_path, ext = os.path.splitext(input_file)
+            output_file = f"{base_path}_Formatado{ext}"
+            formatar_planilha(input_file, output_file)
+        else:
+            print("    Nenhum arquivo selecionado. Operação do conversor cancelada.")
 
-	try:
-		os.chdir(caminho_fechamentos)
-	except FileNotFoundError:
-		print("\n Erro: Pasta não encontrada. Verifique o caminho.")
-		input("Pressione ENTER para sair.")
-		return
-	
-	# Listar os arquivos
+    # Check if we still need to load CSVs for the other reports
+    precisa_csvs = any(r in rel_esc for r in [1, 2, 3, 4, 5, 6, 7])
+    
+    if precisa_csvs:
+        caminho_fechamentos = solicitar_arquivos()
+        if not caminho_fechamentos:
+            input("\nPressione ENTER para fechar...")
+            return
 
-	arquivos = sorted(glob.glob("*.csv"))
-	if not arquivos:
-		print("\n Nenhum arquivo .csv na pasta. Verifique o caminho.")
-		input("Pressione ENTER para sair.")
-		return
-		
-	print(f"\n Encontrados {len(arquivos)} arquivos. Iniciando processamento...")
+        df_bruto = carregar_arquivos(caminho_fechamentos)
+        if df_bruto is None:
+            input("\nPressione ENTER para fechar...")
+            return
 
-	lista_dfs = []
-	
-	# Loop de leitura
-	
-	for arquivo in tqdm(arquivos, desc="Lendo arquivos.", unit="arq"):
-		
-		try:			
-			df_temp = ler_csv_int(arquivo)
-			
-			if df_temp is None:
-				tqdm.write(f"	Erro, não consegui ler {arquivo} (formato desconhecido).")
-				continue
-			
-			df_temp.columns = df_temp.columns.str.lower().str.strip()
-			
-			df_temp.rename(columns={
-			'data_de_ativacao': 'data_ativacao',
-			'data_ativacao (data e hora)': 'data_ativacao',
-			'dt_ativacao': 'data_ativacao'
-			}, inplace=True)
+        precisa_transicoes = any(r in rel_esc for r in [1, 2, 3, 4, 6])
+        df_cancelados = df_suspenso = df_ativacoes_brutas = df_reativacoes = df_math_summary = pd.DataFrame()
 
-			cols_existentes = [c for c in colunas_usadas if c in df_temp.columns]
-			if 'msisdn' not in cols_existentes:
-				continue
-			
-			df_temp = df_temp[cols_existentes].copy()
-			if 'msisdn' in df_temp.columns:
-				df_temp['msisdn'] = df_temp['msisdn'].str.replace(r'\.0$', '', regex=True)
-
-			if 'data_ativacao' in df_temp.columns:
-				series_data = df_temp['data_ativacao'].astype(str)
-
-				tem_barra = series_data.str.contains('/', regex=False).any()
-
-				if tem_barra:
-					df_temp['data_ativacao'] = pd.to_datetime(series_data, dayfirst=True, errors='coerce').dt.date
-				else:
-					df_temp['data_ativacao'] = pd.to_datetime(series_data, dayfirst=False, errors='coerce').dt.date
-
-			df_temp['arquivo_origem'] = arquivo
-			df_temp['indice_leitura'] = pd.to_datetime(extrair_datanome(arquivo), errors='coerce')
-
-			for col in ['fase', 'cliente', 'arquivo_origem']:
-				if col in df_temp.columns:
-					df_temp[col] = df_temp[col].astype('category')
-
-			lista_dfs.append(df_temp)
-		
-		except Exception:
-			pass
-		
-	if not lista_dfs:
-		print("Nenhum dado válido carregado.")
-		return
-	
-	print("\nIniciando processamento...")
-	
-	with tqdm(total=7, desc="Etapas", unit="passo") as pbar:
-	
-		pbar.set_description("\nConsolidando Tabelas...")
-		df = pd.concat(lista_dfs, ignore_index=True)
-
-		del lista_dfs
-		gc.collect()
-		pbar.update(1)
-		
-		# Lógica de comparação Cancelamentos
-		
-		pbar.set_description("\nCalculando Cancelamentos...")
-		
-		pbar.set_description("\nCalculando Cancelamentos...")
-		
-		df.sort_values(by=['msisdn', 'indice_leitura'], inplace=True)
-		
-		df['fase_anterior'] = df.groupby('msisdn')['fase'].shift(1)
-		
-		fase_ant_limpa = df['fase_anterior'].astype(str).str.strip().str.lower()
-		fase_atua_limpa = df['fase'].astype(str).str.strip().str.lower()
-		mask_cancel = (fase_ant_limpa == 'vinculado') & (fase_atua_limpa == 'quarentena')
-		df_cancelados = df[mask_cancel].copy()
-
-		del df['fase_anterior']
-		gc.collect()
-		
-		pbar.update(1)
-		
-		pbar.set_description("\nSalvando Relatório de Cancelamentos...")
-		
-		df_calc_final = pd.DataFrame()	
-
-		if not df_cancelados.empty:
-			df_calc_final = df_cancelados.groupby(['cliente', 'cnpj', 'indice_leitura'])['msisdn'].count().reset_index()
-			df_calc_final.rename(columns={'indice_leitura': 'Data', 'msisdn': 'Cancelamentos_calc'}, inplace=True)
-			df_calc_final.sort_values(by=['cliente', 'Data'], inplace=True)
-			df_calc_final['Data'] = pd.to_datetime(df_calc_final['Data']).dt.date
-			df_calc_final = df_calc_final[['cliente', 'cnpj', 'Data', 'Cancelamentos_calc']]
-			df_calc_final.to_csv("Relatório_Cancelamentos - GSM.csv", sep=';', index=False, encoding='utf-8-sig')
-		
-		pbar.update(1)
-
-		pbar.set_description("\nRecuperando datas...")
-
-		df_apenas_ativos = df[df['fase'].astype(str).str.contains("Vinculad", case=False, na=False)].copy()
-		df_apenas_ativos['data_ativacao'] = pd.to_datetime(df_apenas_ativos['data_ativacao'], errors='coerce')
-		df_apenas_ativos['data_ativacao'] = df_apenas_ativos.groupby(['cliente', 'msisdn'])['data_ativacao'].transform('max')
-		df_ativacoes = df_apenas_ativos.dropna(subset=['data_ativacao']).drop_duplicates(subset=['msisdn'], keep='last').copy()
-		df_ativacoes['data_ativacao'] = df_ativacoes['data_ativacao'].dt.date
-		
-		pbar.set_description("\nSalvando lista detalhada das linhas...")
-
-		cols_save = [c for c in ['cliente', 'cnpj', 'msisdn', 'data_ativacao', 'fase'] if c in df_ativacoes.columns]
-		lista_detalhada = df_ativacoes[cols_save].copy()
-		lista_detalhada.to_csv("Lista_detalhada_ativações.csv", sep=';', index=False, encoding='utf-8-sig')
-		
-		pbar.update(1)
-		
-		pbar.set_description("\nFormatando a tabela...")
-		
-		relatorio_ativacoes = df_ativacoes.groupby(['cliente', 'cnpj', 'data_ativacao'])['msisdn'].count().reset_index()
-		relatorio_ativacoes.rename(columns={'msisdn': 'Ativações'}, inplace=True)
-		
-		pbar.update(1)
-		
-		pbar.set_description("\nSalvando Relatório de Ativações...")	
-		
-		relatorio_ativacoes.to_csv("Relatório_Ativações - GSM.csv", sep=';', index=False, encoding='utf-8-sig')
-		
-		pbar.update(1)
-	
-	print("\n" + "="*90)
-	print("		Processo finalizado.")
-	print("="*90)
-
-
-
-	input("\nPressione ENTER para fechar...")
+        if precisa_transicoes:
+            with tqdm(total=2, desc="Processando transições", bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]") as pbar:
+                df_cancelados, df_suspenso, df_ativacoes_brutas, df_reativacoes, df_math_summary = calcular_transicoes(df_bruto, pbar)
+                
+        print("\n[+] Gerando e salvando relatórios selecionados...")
+        gerar_relatorios(df_bruto, df_cancelados, df_suspenso, df_ativacoes_brutas, df_reativacoes, df_math_summary, rel_esc)
+            
+        if 7 in rel_esc:
+            gerar_relatorio_consumo(df_bruto)
+    
+    print("\n" + "="*90)
+    print("		Processo finalizado com sucesso!")
+    print("="*90)
+    input("\nPressione ENTER para fechar...")
 
 if __name__ == "__main__":
-	main()
+    main()
